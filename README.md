@@ -3,6 +3,26 @@ MetaWatch
 
 Meta analysis of meta compositions in Overwatch
 
+Can currently analyze and extract live statistics from Overwatch replay videos such as:
+- Health bars (Health, Armor, Shield, Death, DPS, HPS)
+- Ultimate (Used, Ready)
+- Player nicknames and heroes [WIP]
+- Team nicknames
+- Killfeed [WIP]
+- Global action measure (Interest) according to the stats above
+- Global action measure from the audio feed [EXPERIMENTAL AND WIP]
+
+Usage
+------------
+
+1. Get a .mp4 replay video with the statistic banner on it.
+2. Register the replay video using the register python script (src/data/raw...), it will move it into a file db in the data/raw folder as data/raw/<vid_UUID>/replay.mp4
+3. Generate a set of matching masks using the PS layers (create a group, move the according slots onto the banner, export the layers using the export_layer .js script in the utils folder)
+4. Paste the layers folders into the new <vid_UUID>/ folder
+5. configure your mongoDB authentication in a local AUTH.cfg
+6. Run the analysis using analyze... py file
+7. Run the visualization Rmarkdown notebook to preprocess the raw data and visualize the results
+
 Project Organization
 ------------
 
@@ -56,24 +76,6 @@ Project Organization
 
 <p><small>Project based on the <a target="_blank" href="https://drivendata.github.io/cookiecutter-data-science/">cookiecutter data science project template</a>. #cookiecutterdatascience</small></p>
 
-# MetaWatch
-Define the meta on OW
-
-##TODOLIST
-Etape 1 :
-
--> Analyse du bandeau spec et kill feed
-	+ Ulti ( qui a son ult, qui utilise son ult, quand il aura son ult, nombre d'ult, quel ulti est utilisé en réponse à un autre )
-	+ Kill ( qui meurt en premier, qui meurt en dernier, etc. , qui tue plus souvent l'autre )
-	+ Points de vie au cours de la partie
-	+ Effect d'affectation ( sleep, freeze, purple, etc. et ce qui en découle)
-Toute ses infos -> un fichier général, un fichier pour les données par map, un fichier pour les données par compo -> cible -> %winfigth, %winside, %winmap
-
-Etape 2 :
-
--> Analyse du jeu individuel
-	+ Capacité ( précision de la capacité, taux d'activation, etc.)
-	+ shoot ( précision / cible, nombre de duel gagné )
 
 ###maitre mot de ce projet
 https://xkcd.com/1319/
