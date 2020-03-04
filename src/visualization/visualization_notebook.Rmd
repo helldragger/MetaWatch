@@ -1,0 +1,1426 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r func-init, message=FALSE, warning=FALSE, include=FALSE}
+require(tidyverse)
+require(zoo)
+require(magrittr)
+require(plotly)
+
+require(ggplot2);
+require(reshape2);
+
+
+# death chronology.
+frame2Time<- function(frame) {
+  secs <- (frame %/% 60) %% 60
+  minutes <- (frame %/% 60) %/% 60
+  return(paste( minutes, formatC(secs, width=2, flag="0") , sep=":"))
+}
+
+
+plotHealthBars <- function(data){
+  meltedData <- melt(data %>% select(frame, player_name, team_name, health, armor, shield), id=c("frame", "player_name", "team_name"));
+  return(meltedData %>%
+            ggplot(aes(x=frame, y=value, fill=variable))+
+              geom_area()+
+              facet_grid(team_name+player_name~., scales = "free_y")+
+              labs(title="Health bar data",
+                   subtitle ="Sustained health at 0 means death",
+                   x="Frame (60f/s)",
+                   y="Heroes Health bars data"))
+}
+
+plotDeathPeriods<- function(data){
+  return(data %>%
+            ggplot(aes(x=frame, y=death))+
+              geom_area()+
+              facet_grid(team_name+player_name~., scales = "fixed")+
+              labs(title="Death periods",
+                   x="Frame (60f/s)",
+                   y="Heroes Death state"))
+}
+
+plotDeathTimestamps<- function(data){
+  return(data %>%
+          filter(!is.na(deathChange))%>%
+          ggplot(aes(x=frame, y=deathChange, color=deathChange, label=frame2Time(frame)))+
+            geom_rug()+
+            geom_text()+
+            facet_grid(team_name+player_name~., scales = "fixed")+
+              labs(title="Death event timestamps",
+                   x="Frame (60f/s)",
+                   y="Heroes Death events timestamps"))
+}
+
+
+
+plotUltimatePeriods<- function(data){
+  return(data %>%
+            ggplot(aes(x=frame, y=ultimate))+
+              geom_area()+
+              facet_grid(team_name+player_name~., scales = "fixed")+
+              labs(title="Ultimate periods",
+                   x="Frame (60f/s)",
+                   y="Heroes Ultimate state"))
+}
+
+plotUltimateTimestamps<- function(data){
+  return(data %>%
+          filter(!is.na(ultimateChange) )%>%
+          ggplot(aes(x=frame, y=ultimateChange, color=ultimateChange, label=frame2Time(frame)))+
+            geom_rug()+
+            geom_text()+
+            facet_grid(team_name+player_name~., scales = "fixed")+
+              labs(title="Ultimate events timestamps",
+                   x="Frame (60f/s)",
+                   y="Heroes Ultimate events timestamps"))
+}
+
+#plotData <- function(data){
+#  print(data %>% plotHealthBars());
+#  print(data %>% plotDeathPeriods());
+#  print(data %>% plotDeathTimestamps());
+#}
+
+calcDeathCount<- function(data){
+  return(data%>%
+    group_by(team_UUID) %>%
+    filter(deathChange == "DEATH")%>%
+    count() %>%
+    ungroup())
+}
+
+plotDeathRatio<-function(data){
+  return(data %>% 
+           calcDeathCount() %>%
+           ggplot(aes(label=n, fill=team_name, x=1, y=n))+
+              geom_col(position = "fill")+
+              coord_flip()+
+              labs(title="Team Death Ratio",
+                   subtitle = "Less is better for the team_UUID, this is the inverse of the kill ratio",
+                   x="Team Death Ratio",
+                   y=""))
+}
+
+plotDeathCount<-function(data){
+  return(data %>% 
+           calcDeathCount() %>%
+           ggplot(aes(label=n, fill=team_name, x="Deaths", y=n))+
+              geom_col(position = "dodge")+
+              labs(title="Team Death Count",
+                   subtitle = "Less is better for the team_UUID, this is the inverse of the kill count",
+                   y="Team Death Count",
+                   x=""))
+              
+}
+
+plotDeltaBars <- function(data){
+  meltedData <- melt(data %>% select(frame, player_name, team_name, deltaHealth, deltaArmor, deltaShield), id=c("frame", "player_name", "team_name"));
+  return(meltedData %>%
+            ggplot(aes(x=frame, y=value, group=team_name, fill=variable))+
+              geom_col(position = "dodge")+
+              facet_grid(team_name+player_name~., scales = "free")+
+              labs(title="Health bar data variations",
+                   subtitle ="Positive value means gains from healing or abilities, negative values means loss either from damages or loss of a temporary ability, 0 means no changes, either by healing damages at the same rate, or being unharmed and unbuffed.",
+                   x="Frame (60f/s)",
+                   y="Heroes Health bars data variations"));
+}
+
+plotDetectedNicknames <- function(data){
+  return(data %>%
+    filter(!is.na(player_name)) %>%
+      ggplot(aes(x=player_name, group=player_name))+
+      geom_histogram(stat="count")+
+      facet_grid(team_name~player_UUID, scales = "free")+
+              coord_flip()+
+              labs(title="Detected nicknames frequency",
+                   subtitle ="More is better, the most frequent is considered the detected player_name.",
+                   x="Nickname",
+                   y="Frequency"));
+}
+
+
+cleanupCloseUltimates <- function(teamHeroData){
+  original = teamHeroData %>% select(frame, ultimateChange)
+  ultimateChangeFrames = teamHeroData%>%filter(!is.na(ultimateChange))
+  # managing start of clip ( USED without READY)
+  for(i in rownames(ultimateChangeFrames)) {
+    row <- ultimateChangeFrames[i,]
+    currFrame <- row$frame
+    if (teamHeroData%>%filter(frame == currFrame)%>%select(ultimateChange) == "USED"){
+      teamHeroData[teamHeroData$frame == currFrame, "ultimateChange"] = NA
+      ultimateChangeFrames[ultimateChangeFrames$frame == currFrame, "ultimateChange"] = NA
+
+    } else {
+      break;
+    }
+  }
+  ultimateChangeFrames%<>% filter(!is.na(ultimateChange))
+
+
+  # managing end of clip ( READY without USED )
+  ultimateChangeFrames%<>%arrange(-frame)
+  for(i in rownames(ultimateChangeFrames)) {
+    row <- ultimateChangeFrames[i,]
+    currFrame <- row$frame
+    if (teamHeroData%>%filter(frame == currFrame)%>%select(ultimateChange) == "READY"){
+      teamHeroData[teamHeroData$frame == currFrame, "ultimateChange"] = NA
+      ultimateChangeFrames[ultimateChangeFrames$frame == currFrame, "ultimateChange"] = NA
+      
+    }else {
+      break;
+    }
+  }
+  
+  # here we iterate throught the whole game for every player and keep track of the last valid death symbol encountered during the last DEATH_SPAN frames.
+  # if another death event is encountered, this means the last valid Death event is the result of a fluctuation,
+  # we then invlidate the last DEATH flag and set it to STABLE, the current last DEATH flag being now the current one.
+  ultimateChangeFrames%<>% filter(!is.na(ultimateChange))
+
+  ultimateChangeFrames%<>%arrange(frame)
+  
+
+  USED_TO_READY_SPAN <- 60*20 # 20 seconds assuming 60 fps.
+  READY_TO_USED_SPAN <- 60*0.2 # 0.2 seconds
+  lastReadyFrame = -1
+  lastUsedFrame = -1
+  
+  # 1. pour chaque frame:
+  # READY:
+  #  > Si aucun READY repertorié, alors il deviens le READY de référence.
+  #  > Si la dernière détection est un READY, alors, le READY actuel est invalide
+  #  > Si la dernière détection est un USED:
+  #    > Si la distance entre le dernier USED et le READY actuel est supérieure ou égale à la distance minimale USED_TO_READY, alors le READY actuel deviens la nouvelle référence.
+  #    > Si cette distance est inférieure, alors ce READY est invalide.
+  
+  # USED:
+  #  > Si aucun USED repertorié, alors, il deviens, le USED de référence.
+  #  > Si la dernière détection est un USED, alors, le USED actuel est invalide.
+  #  > Si la dernière détection est un READY:
+  #    > Si la distance entre le dernier READY et le USED actuel est supérieure ou égale à la distance minimale READY_TO_USED, alors, le USED actuel deviens la nouvelle référence.
+  #    > Si cette distance est inférieure, alors le USED est invalide.
+  
+  lastDetection <- NA
+  for(i in rownames(ultimateChangeFrames)) {
+    row <- ultimateChangeFrames[i,]
+    currFrame <- row$frame
+    if(!is.na(teamHeroData[teamHeroData$frame == currFrame,]$ultimateChange)){
+      if(teamHeroData[teamHeroData$frame == currFrame,]$ultimateChange == "READY")
+      {
+        if (lastReadyFrame == -1){
+          lastReadyFrame = currFrame
+          lastDetection = "READY";
+        }
+        else if (lastDetection != "READY" & abs(lastUsedFrame - currFrame) >= USED_TO_READY_SPAN){
+          lastReadyFrame = currFrame
+          lastDetection = "READY";
+        }
+        else { # invalidé 
+          teamHeroData[teamHeroData$frame == currFrame,]$ultimateChange = NA
+        }
+      }
+      else if(teamHeroData[teamHeroData$frame == currFrame,]$ultimateChange == "USED")
+      {
+        if (lastUsedFrame == -1){
+          lastUsedFrame = currFrame
+          lastDetection = "USED";
+        }
+        else if (lastDetection != "USED" & abs(lastReadyFrame - currFrame) >= READY_TO_USED_SPAN){
+          lastUsedFrame = currFrame
+          lastDetection = "USED";
+        }
+        else { # invalidé 
+          teamHeroData[teamHeroData$frame == currFrame,]$ultimateChange = NA
+        }
+      }
+    }
+  }
+  return(teamHeroData)
+}
+
+cleanupCloseDeaths <- function(teamHeroData){
+  original = teamHeroData %>% select(frame, deathChange)
+  deathChangeFrames = teamHeroData%>%filter(!is.na(deathChange))
+  # managing start of clip ( respawn without death)
+  for(i in rownames(deathChangeFrames)) {
+    row <- deathChangeFrames[i,]
+    currFrame <- row$frame
+    if (teamHeroData%>%filter(frame == currFrame)%>%select(deathChange) == "RESPAWN"){
+      #print(paste("respawn without death detected @ ",frame2Time(currFrame)))
+      teamHeroData[teamHeroData$frame == currFrame, "deathChange"] = NA
+      deathChangeFrames[deathChangeFrames$frame == currFrame, "deathChange"] = NA
+
+    } else {
+      break;
+    }
+  }
+  deathChangeFrames%<>% filter(!is.na(deathChange))
+
+  # managing end of clip ( deaths without respawns.)
+  deathChangeFrames%<>%arrange(-frame)
+  for(i in rownames(deathChangeFrames)) {
+    row <- deathChangeFrames[i,]
+    currFrame <- row$frame
+    if (teamHeroData%>%filter(frame == currFrame)%>%select(deathChange) == "DEATH"){
+      #print(paste("death without respawn detected @ ",frame2Time(currFrame)))
+      teamHeroData[teamHeroData$frame == currFrame, "deathChange"] = NA
+      deathChangeFrames[deathChangeFrames$frame == currFrame, "deathChange"] = NA
+      
+    }else {
+      break;
+    }
+  }
+  
+  # here we iterate throught the whole game for every player and keep track of the last valid death symbol encountered during the last DEATH_SPAN frames.
+  # if another death event is encountered, this means the last valid Death event is the result of a fluctuation,
+  # we then invlidate the last DEATH flag and set it to STABLE, the current last DEATH flag being now the current one.
+  deathChangeFrames%<>% filter(!is.na(deathChange))
+
+  deathChangeFrames%<>%arrange(frame)
+  RESPAWN_TO_DEATH_SPAN <- 60*15 # 15 seconds assuming 60 fps.
+  DEATH_TO_RESPAWN_SPAN <- 60*2 # 2 seconds to accept deathmatches
+  lastDeathFrame = -1
+  lastRespawnFrame = -1
+  lastDetection <- NA
+  for(i in rownames(deathChangeFrames)) {
+    row <- deathChangeFrames[i,]
+    currFrame <- row$frame
+    if(!is.na(teamHeroData[teamHeroData$frame == currFrame,]$deathChange)){
+      if(teamHeroData[teamHeroData$frame == currFrame,]$deathChange == "DEATH")
+      {
+        if (lastDeathFrame == -1){
+          lastDeathFrame = currFrame
+          lastDetection = "DEATH";
+        }
+        else if (lastDetection != "DEATH" & abs(lastRespawnFrame - currFrame) >= RESPAWN_TO_DEATH_SPAN){
+          lastDeathFrame = currFrame
+          lastDetection = "DEATH";
+        }
+        else { # invalidé 
+          teamHeroData[teamHeroData$frame == currFrame,]$deathChange = NA
+        }
+      }
+      else if(teamHeroData[teamHeroData$frame == currFrame,]$deathChange == "RESPAWN")
+      {
+        if (lastRespawnFrame == -1){
+          lastRespawnFrame = currFrame
+          lastDetection = "RESPAWN";
+        }
+        else if (lastDetection != "RESPAWN" & abs(lastDeathFrame - currFrame) >= DEATH_TO_RESPAWN_SPAN){
+          lastRespawnFrame = currFrame
+          lastDetection = "RESPAWN";
+        }
+        else { # invalidé 
+          teamHeroData[teamHeroData$frame == currFrame,]$deathChange = NA
+        }
+      }
+    }
+  }
+  return(teamHeroData)
+}
+
+cleanDeathStateData <- function(data){
+  for(team_UUID in unique(data$team_UUID)){
+    #print(paste("parsing team_UUID ",team_UUID))
+    for(player_UUID in unique(data[data$team_UUID == team_UUID,]$player_UUID)){
+      #print(paste("parsing player_UUID ",player_UUID))
+      data[data$team_UUID == team_UUID & data$player_UUID == player_UUID,] = cleanupCloseDeaths(data[data$team_UUID == team_UUID & data$player_UUID == player_UUID,])
+    }
+  }
+  return(data)
+}
+
+
+cleanUltimateStateData <- function(data){
+  for(team_UUID in unique(data$team_UUID)){
+    #print(paste("parsing team_UUID ",team_UUID))
+    for(player_UUID in unique(data[data$team_UUID == team_UUID,]$player_UUID)){
+      #print(paste("parsing player_UUID ",player_UUID))
+      data[data$team_UUID == team_UUID & data$player_UUID == player_UUID,] = cleanupCloseUltimates(data[data$team_UUID == team_UUID & data$player_UUID == player_UUID,])
+    }
+  }
+  return(data)
+}
+
+calcHeroAliveIntervals<- function(heroData, startFrame=0, endFrame=15000){
+  events <- heroData %>% 
+    filter(!is.na(deathChange))%>% 
+    arrange(frame);
+  intervals <- data.frame(list(start=integer(0), end=integer(0)));
+  
+  
+  intervalStart = startFrame
+  for(i in rownames(events)){
+    event <- events[i,]
+    if(event$deathChange == "RESPAWN"){
+      intervalStart = event$frame
+    }else if(event$deathChange == "DEATH"){
+      intervalStop = event$frame
+      intervals %<>% rbind(list(start=intervalStart, stop=intervalStop))
+    }
+  }
+  intervals %<>% rbind(list(start=intervalStart, stop=endFrame))
+
+  return(intervals)
+}
+
+splitHeroesSurvivabilityData <- function(data){
+  intervals <- data.frame(list(team_UUID=character(0), player_UUID=integer(0), start=integer(0), stop=integer(0)), stringsAsFactors = F)
+  startFrame = min(data$frame)
+  lastFrame = max(data$frame)
+  for(teamIndex in unique(data$team_UUID)){
+    for(heroIndex in unique(data$player_UUID)){
+      #print(paste("splitting team_UUID", teamIndex, "player_UUID", heroIndex))
+      heroData<- data %>% filter(team_UUID==teamIndex & player_UUID==heroIndex)
+      heroIntervals <- calcHeroAliveIntervals(heroData, startFrame,lastFrame);
+      heroIntervals %<>% cbind(list(team_UUID=rep.int( teamIndex, nrow(heroIntervals))))
+      heroIntervals %<>% cbind(list(player_UUID=rep.int(heroIndex, nrow(heroIntervals) )))
+      intervals %<>% rbind(heroIntervals)
+    }
+  }
+  return(intervals)
+}
+
+getDataInterval<- function(data, startFrame=NA, endFrame=NA){
+  firstFrame = min(data$frame);
+  lastFrame = max(data$frame);
+  if(is.na(startFrame) && is.na(endFrame)){
+    return(data)
+  }
+  if (is.na(startFrame)){
+    startFrame = firstFrame
+  }else{
+    startFrame = max(firstFrame, min(startFrame, lastFrame))
+  }
+  if( is.na(endFrame)){
+    endFrame = lastFrame
+  }else{
+    endFrame = max(firstFrame, min(endFrame, lastFrame))
+  }
+  return(data%>%filter(frame >= startFrame & frame <= endFrame))
+
+}
+
+
+getDeltaData<- function(data){
+  FPS = 60;
+  #TODO get the actual video FPS.
+  return(data %>% 
+           group_by(player_UUID, team_UUID) %>%
+           mutate(deltaHealth = (health-lag(health))/((frame-lag(frame))/FPS), 
+                  deltaArmor = (armor-lag(armor))/((frame-lag(frame))/FPS), 
+                  deltaShield = (shield-lag(shield))/((frame-lag(frame))/FPS))%>%
+          ungroup());
+}
+# detection des fights
+# une fight est une période où les joueurs prennent des dégats.
+# une fight prends en compte l'intégralité des deux équipes
+# une fight est terminée si les deux équipes ne perdent plus de pv pendant au moins 5 secondes
+# une fight débute si l'un des héros perds des pv.
+
+
+calcFightIntervals<- function(data){
+  DAMAGE_TAKEN_THRESHOLD = 20 # this should allow little fluctuations but nothing major.
+  END_FIGHT_THRESHOLD = 60*5 # 5 sec
+  current_no_damage_count = 0
+  in_fight=F
+  currFightStart = 0
+  
+  fightIntervals = data.frame(list(start=numeric(0), stop=numeric(0)))
+  
+  lastFrame = max(data$frame)
+  
+  for (currFrame in unique(data$frame)) {
+    DAMAGE_TAKEN = data %>% 
+      filter(frame == currFrame) %>%
+      tally(damageTaken) >= DAMAGE_TAKEN_THRESHOLD
+    if(is.na(DAMAGE_TAKEN)){
+      DAMAGE_TAKEN = F
+    }
+    if(in_fight){
+      if(!DAMAGE_TAKEN){
+        current_no_damage_count = current_no_damage_count + 1
+      }
+      
+      if(current_no_damage_count == END_FIGHT_THRESHOLD){
+        current_no_damage_count = 0
+        in_fight=F
+        fightIntervals%<>%
+          rbind(list(start=currFightStart, stop=currFrame))
+        currFightStart = NA
+  
+      }
+    }else{
+      if(DAMAGE_TAKEN){
+        currFightStart = currFrame
+        in_fight = T
+      }
+    }
+    if(currFrame %% 1000 == 0){
+      print(paste(currFrame, "/", lastFrame))
+    }
+  }
+  if(in_fight){
+    fightIntervals%<>%
+      rbind(list(start=currFightStart, stop=lastFrame+1))
+  }
+  return(fightIntervals)
+}
+
+
+
+
+
+#Mais on va commencer petit
+#Pour pas se décourager et déjà optimiser les trucs simple
+#Première étape : arrive à decouper la map en fight le début d'un fight jusqu'à la fin [FAIT]
+
+#Deuxième étape
+#Déterminer quel équipe gagne un fight
+
+
+
+
+
+
+plotTeamFightDeaths <- function(data){
+  return(data%>%
+          filter(!is.na(DeathFight_id)) %>%
+          group_by(DeathFight_id)%>%
+          count(player_name, team_name, name = "Deaths") %>%
+          ggplot(aes(x="Killed Heroes", y=Deaths, fill=as.factor(player_name)))+
+          geom_col()+
+          facet_grid(DeathFight_id~team_name, scales = "free")+
+              labs(title="Team Death Count per team_UUID fight",
+                   subtitle = "Less is better for the team_UUID, this is the inverse of the kill count",
+                   y="Team Death Count",
+                   x=""))
+}
+
+plotTeamFightRatio <- function(data){
+  return(data %>% 
+          filter(!is.na(DeathFight_id)) %>%
+          group_by(DeathFight_id)%>%
+          count(team_name, name = "Deaths") %>%
+          ggplot(aes(label=Deaths, fill=team_name, x=1, y=Deaths, group=DeathFight_id))+
+              geom_col(position = "fill")+
+              geom_hline(aes( yintercept=0.5))+
+              facet_grid(DeathFight_id~. )+
+              coord_flip()+
+              labs(title="Team Death Ratio per team_UUID fight",
+                   subtitle = "Less is better for the team_UUID, this is the inverse of the kill ratio",
+                   y="Team Death Ratio",
+                   x=""))
+}
+
+
+
+calcTeamFightResult <- function(data){
+  return(data %>% 
+          filter(!is.na(DeathFight_id)) %>%
+          group_by(DeathFight_id)%>%
+          count(team_UUID) %>%
+          mutate(result=ifelse(n == max(n), "WIN", "LOSE")))
+}
+
+
+
+
+
+
+#Troisième etape
+#Déterminer pour chaque fight l'ordre des morts associer au winfight
+
+
+
+plotTeamFightTimestamps <- function(data){
+  return(data %>%
+          filter(!is.na(DeathFight_id)) %>%
+           ggplot(aes(x=stop, y=fightDeathOrder, label=paste(team_name,player_name)))+
+           geom_label()+
+           geom_rug()+
+           facet_grid(DeathFight_id~. , scales="free")+
+              labs(title="Death events timestamps during the team_UUID fight",
+                   x="Frame (60f/s)",
+                   y="Heroes Death events timestamps"))
+}
+
+#Quatrième étape 
+#Déterminer pour chaque fight qui a son ulti et qui l'utilise et en déduire l'ordre d'utilisation. Et associer ça a chaque fight
+#On aura donc des motifs qui devrait sortir
+
+
+plotEventSequence <- function(deathEventsData, ultimateEventsData, combinationsData){
+  combinationsData %<>%
+    select(start, stop, team_name, size) %>%
+    unique()
+  
+  return(ggplot()+
+            geom_vline(data=combinationsData, aes(xintercept=start, color=as.factor(size), group=team_name, linetype="COMBO START"))+
+            geom_vline(data=combinationsData, aes(xintercept=stop, color=as.factor(size), group=team_name, linetype="COMBO END"))+
+            geom_point(data=ultimateEventsData, aes(x=frame, y=player_name, group=team_name, color=ultimateChange))+
+            geom_point(data=deathEventsData, aes(x=frame, y=player_name, group=team_name, color=deathChange))+
+            facet_grid(team_name~., scales = "free_y")+
+              labs(title="Events during the team_UUID fight",
+                   subtitle="",
+                   x="Frame (60f/s)",
+                   y="Heroes Events"))
+}
+
+getEvents <- function(data){
+  return( data %>%
+    filter((!is.na(deathChange)) | (!is.na(ultimateChange)))%>%
+    select(frame, timestamp, team_UUID, player_name, deathChange, ultimateChange)%>%
+    mutate(event= paste(ifelse(!is.na(deathChange), deathChange, ""),
+                        ifelse(!is.na(ultimateChange), paste("ULT", ultimateChange), ""), collapse = "", sep = "")))
+}
+
+plotCombinationSequence <- function(data){
+  return(data%>%
+            group_by(combinationId, start, size, team_name) %>%
+            summarise(event=toString(player_name)) %>%
+            ungroup() %>%
+            ggplot(aes(x=start, y="Combinations", size=as.factor(size), label=event, color=event, group=team_name))+
+            geom_point()+
+            facet_grid(team_name~., scales = "free_y")+
+              labs(title="Ultimates combo size during the team_UUID fight",
+                   subtitle="The size of a combo is the amount of ultimates used during the combo span of time",
+                   x="Frame (60f/s)",
+                   y="Ultimate combo size"))
+}
+
+
+calcUltimateCombinations<- function(data){
+  ultimateEvents <- data %>%
+    filter(ultimate_state == 1)
+  
+  COMBINATION_SPAN <- 60*6 # 6 seconds between the first and the last ultimate of a combination
+  
+  ultimateCombinations<- tibble(data.frame(list(combinationId=numeric(0),start=numeric(0), stop=numeric(0), size=numeric(0), team_UUID=numeric(0), player_UUID=numeric(0)), stringsAsFactors = FALSE))
+  
+  lastCombinationFrameTeamA <- -1
+  lastCombinationFrameTeamB <- -1
+
+  lastCombinationHeroesTeamA <- c()
+  lastCombinationHeroesTeamB <- c()
+  
+  combinationId <- -1
+  # pour chaque équipe:
+  # si l'event appartient à l'équipe:
+  #     Si aucune combinaison n'est en route, on commence une nouvelle combinaison
+  #     Si une combinaison est déjà en route, alors on l'ajoute à la combinaison
+  #     Si la durée entre le début de la combinaison et l'ulti actuel est > à COMBINATION_SPAN, on sauvegarde la combi et en commencons une nouvelle avec l'ulti actuel.
+  # À la fin, si une combi était en cours de création, on l'ajoute.
+  for(ultimate_i in rownames(ultimateEvents)){
+    event <- ultimateEvents[ultimate_i,]
+    currFrame <- event$frame
+    if(event$team_UUID == 1){
+      if(lastCombinationFrameTeamA == -1){
+        combinationId <- combinationId + 1
+        # no combination started yet
+        currentCombinationTeamA<- list(combinationId=combinationId, start=currFrame, stop=currFrame, size=1, team_UUID=1, player_UUID=numeric(0))
+        lastCombinationHeroesTeamA<- list(event$player_UUID)
+        lastCombinationFrameTeamA <- currFrame
+        
+      }else if(abs(currFrame - lastCombinationFrameTeamA) <= COMBINATION_SPAN){
+        # a combination is still ongoing
+        currentCombinationTeamA$stop <- currFrame
+        currentCombinationTeamA$size <- currentCombinationTeamA$size + 1
+        lastCombinationHeroesTeamA<- c(lastCombinationHeroesTeamA, event$player_UUID)
+
+      }else{
+        
+        # the last combination is too old. We save it
+        for(player_UUID in lastCombinationHeroesTeamA){
+          currentCombinationTeamA$player_UUID = player_UUID
+          ultimateCombinations %<>%
+            rbind(data.frame(currentCombinationTeamA, stringsAsFactors = FALSE))
+        }
+        # then we start a new one.
+        combinationId <- combinationId + 1
+        currentCombinationTeamA<- list(combinationId=combinationId, start=currFrame, stop=currFrame, size=1, team_UUID=1, player_UUID=numeric(0))
+        lastCombinationHeroesTeamA<- list(event$player_UUID)
+        lastCombinationFrameTeamA <- currFrame
+      }
+    }else{
+      if(lastCombinationFrameTeamB == -1){
+        combinationId <- combinationId + 1
+        
+        # no combination started yet
+        currentCombinationTeamB<- list(combinationId=combinationId, start=currFrame, stop=currFrame, size=1, team_UUID=2, player_UUID=numeric(0))
+        lastCombinationHeroesTeamB<- list(event$player_UUID)
+        lastCombinationFrameTeamB <- currFrame
+        
+      }else if(abs(currFrame - lastCombinationFrameTeamB) <= COMBINATION_SPAN){
+        # a combination is still ongoing
+        currentCombinationTeamB$stop <- currFrame
+        currentCombinationTeamB$size <- currentCombinationTeamB$size + 1
+        lastCombinationHeroesTeamB<- c(lastCombinationHeroesTeamB, event$player_UUID)
+      }else{
+        # the last combination is too old. We save it
+        for(player_UUID in lastCombinationHeroesTeamB){
+          currentCombinationTeamB$player_UUID = player_UUID
+          ultimateCombinations %<>%
+            rbind(data.frame(currentCombinationTeamB, stringsAsFactors = FALSE))
+        }
+        # then we start a new one.
+        combinationId <- combinationId + 1
+        currentCombinationTeamB<- list(combinationId=combinationId, start=currFrame, stop=currFrame, size=1, team_UUID=2, player_UUID=numeric(0))
+        lastCombinationHeroesTeamB<- list(event$player_UUID)
+        lastCombinationFrameTeamB <- currFrame
+      }
+    }
+  }
+  
+  # we save the last ongoing combinations
+  #
+  #Team A
+  for(player_UUID in lastCombinationHeroesTeamA){
+    currentCombinationTeamA$player_UUID = player_UUID
+    ultimateCombinations %<>%
+      rbind(data.frame(currentCombinationTeamA, stringsAsFactors = FALSE))
+  }
+  #Team B
+  for(player_UUID in lastCombinationHeroesTeamB){
+    currentCombinationTeamB$player_UUID = player_UUID
+    ultimateCombinations %<>%
+      rbind(data.frame(currentCombinationTeamB, stringsAsFactors = FALSE))
+  }
+  
+  return(ultimateCombinations)
+}
+
+#Par exemple BLADE et trans utilisée dans un fight c'est un motif de 2
+#Et Nano BLADE trans equafisszur c'est in motif de 4 dans lequel on retrouve ce même motif de 2 qui est BLADE trans
+#Tu vois le délire ?
+#Et cinquième étape
+#Déterminer les compositions qui se font face et compter le nombre de fight win contre tel ou tel compo
+#On va déjà commencer la dessus
+#Et après on ira plus loin vers des trucs plus précis
+
+
+
+```
+
+
+
+
+
+
+```{r data-init, message=FALSE, warning=FALSE, include=FALSE}
+
+
+runningWindowFrames <- 60 # based on 60 fps, so a rolling window of 1 sec
+
+rolling.mean <- function(x) rollmean(x,runningWindowFrames, na.pad=TRUE, align="right")
+
+
+```
+
+```{r data-killfeed}
+library("RSQLite")
+
+## connect to db
+con <- dbConnect(RSQLite::SQLite(), dbname="D:/Documents/projects/MetaWatch/MetaWatch/data/processed/MetaWatch_statistics.sqlite3")
+
+# chosen video
+LATEST = -1;
+VID_UUID = 31;
+ANALYSIS_UUID = LATEST;
+
+analysis <- dbReadTable(con, "analysis")
+if (ANALYSIS_UUID == LATEST){
+  ANALYSIS_UUID = analysis %>% filter(vid_UUID == VID_UUID) %>% arrange(-analysis_UUID) %>% select(analysis_UUID) %>% top_n(1) %>% as.numeric()
+  
+}
+print(VID_UUID)
+print(ANALYSIS_UUID)
+```
+
+
+```{r data-health}
+
+
+##################################################################################
+######   HEALTH, ARMOR, SHIELD, DEATH, TEAM FIGHTS
+healthData <- dbReadTable(con, "RAW_healthbars") %>% 
+  # Filtering to the actual interesting analysis
+  filter(vid_UUID == VID_UUID & analysis_UUID == ANALYSIS_UUID) %>%
+  select(-vid_UUID, -analysis_UUID) %>%
+  # Starting the analysis.
+  group_by( team_UUID, player_UUID) %>%
+  arrange(frame) %>%
+  # we convert the ultimate from a boolean value to a numeric value. This will allows us to do a running mean on the ultimate state.
+  mutate_each(funs(rolling.mean), health, armor, shield)%>%
+  ungroup() %>% 
+  replace_na(list(health = 0,armor = 0,shield = 0)) %>%
+  # we consider a death to be when health is <= 12, health being a mean and the min step being 25, this can be considered as being health == 0 for a few frames.
+  # we do the same for the ultimate value
+  # we also remove any not valid player_name according to the blizzard player_name rules. 
+  mutate(death=ifelse(health<=25, 1, 0))%>%
+  group_by(team_UUID, player_UUID) %>%
+  # for each player_UUID of each team_UUID, we detect any death state change and categorize it as DEATH or RESPAWN.
+  mutate(deathChange = ifelse(death != dplyr::lag(death), ifelse(dplyr::lag(death)==1, "RESPAWN", "DEATH"), NA)) %>%
+  ungroup()%>%
+  cleanDeathStateData() %>% 
+  # DPS and HPS data calculation
+  getDeltaData()%>%
+  # Replacing NULL data (begin of the recording and end of it, plus potential recording errors)
+  replace_na(list(deltaHealth = 0,deltaArmor = 0, deltaShield= 0)) %>%
+  # for each player_UUID of each team_UUID at each frame, we determine the damage taken and the heal received.
+  group_by(frame, team_UUID, player_UUID) %>%
+  mutate(damageTaken = abs(min(deltaHealth, 0)+min(deltaArmor, 0)+min(deltaShield, 0)),
+         healTaken = abs(max(deltaHealth, 0)+max(deltaArmor, 0)+max(deltaShield, 0))) %>%
+  replace_na(list(damageTaken = 0,healTaken = 0)) %>%
+  ungroup()
+
+
+
+
+# here we calculate the intervals of death and respawn of every player_UUID during the game, this will allow to attribute deaths / kills to specific team_UUID fights
+heroesAliveIntervals <- healthData %>% splitHeroesSurvivabilityData();
+
+# Here we calculate the intervals of the specific team_UUID fights of the game
+fightIntervals <- healthData %>% calcFightIntervals()
+
+healthData %>%
+  filter(deltaHealth < 250)%>%
+  select(frame, damageTaken,team_UUID, player_UUID) %>%
+  ggplot(aes(x=frame, y=damageTaken, color=damageTaken))+
+    geom_line()+
+    facet_grid(player_UUID~team_UUID, scales = "free")
+
+# Here we attribute the deaths to their corresponding team_UUID fight
+teamFightDeathData <- heroesAliveIntervals %>%
+  mutate(
+    DeathFight_id=lapply(stop,
+                         function(frame){return(which( fightIntervals$start <= frame & frame < fightIntervals$stop ))}),
+    RespawnFight_id=lapply(start,
+                           function(frame){return(which( fightIntervals$start <= frame & frame < fightIntervals$stop ))})) %>%
+  mutate(
+        DeathFight_id = unlist(ifelse(sapply(DeathFight_id, length) == 0, NA, DeathFight_id)),
+        RespawnFight_id = unlist(ifelse(sapply(RespawnFight_id, length) == 0, NA, RespawnFight_id)))%>%
+  group_by(DeathFight_id)%>%
+  arrange(stop)%>%
+  mutate(fightDeathOrder = 1:n()) %>%
+  ungroup()
+
+# here we calculate the team_UUID fight results
+teamFightResult <- teamFightDeathData %>% 
+  calcTeamFightResult()
+
+
+# Here we augment the health data with the coresponding team_UUID fight interval id.
+
+healthData %<>%
+  group_by(frame) %>%
+  mutate(fight_id = lapply(frame, function(frame){return(which( fightIntervals$start <= frame & frame < fightIntervals$stop ))} )) %>%
+  unnest() 
+
+# Here we just isolate death events
+deathEvents <- healthData %>%
+  filter(!is.na(deathChange)) %>%
+  select(frame, team_UUID, player_UUID, deathChange)
+
+```
+
+```{r data-ultimate}
+##################################################################################
+######   ULTIMATE
+ultimateData <- dbReadTable(con, "RAW_ultimate") %>%
+  # Filtering to the actual interesting analysis
+  filter(vid_UUID == VID_UUID & analysis_UUID == ANALYSIS_UUID) %>%
+  select(-vid_UUID, -analysis_UUID)
+
+ULTIMATE_DETECTION_THRESHOLD = 0.03
+
+ultimateData %>% 
+  group_by(team_UUID, player_UUID) %>%
+  arrange(frame) %>%
+  mutate_each(funs(rolling.mean), ultimate_state)%>%
+  ungroup() %>% 
+  ggplot(aes(x=frame, y=ultimate_state, color=ultimate_state<ULTIMATE_DETECTION_THRESHOLD))+
+    geom_line()+
+    geom_abline(aes(slope=0, intercept=ULTIMATE_DETECTION_THRESHOLD))+
+    facet_grid(player_UUID~team_UUID, scales="free")
+
+# Starting the analysis.
+# ultimate events
+ultimateEvents <- ultimateData %>% 
+  group_by(team_UUID, player_UUID) %>%
+  arrange(frame) %>%
+  mutate_each(funs(rolling.mean), ultimate_state)%>%
+  ungroup() %>% 
+  replace_na(list(ultimate_state = 0)) %>%
+  mutate(ultimate_state=ifelse(ultimate_state < ULTIMATE_DETECTION_THRESHOLD, 0, 1))%>%
+  group_by(team_UUID, player_UUID) %>%
+  # we then detect any ultimate state change and categorize it as READY or USED.
+  mutate(ultimateChange = ifelse(ultimate_state != dplyr::lag(ultimate_state), 
+                                 ifelse(dplyr::lag(ultimate_state)==1, 
+                                        "READY", 
+                                        "USED"), 
+                                 NA)) %>%
+  ungroup()%>%
+  # we cleanup invalid ultimate states
+  cleanUltimateStateData() %>%
+  # we then keep only the frame, team_UUID, player_UUID and state of valid states
+  filter(!is.na(ultimateChange))
+# ultimate combinations
+ultimateCombinations <- ultimateEvents %>%
+  calcUltimateCombinations()
+```
+
+```{r data-team_name} 
+
+##################################################################################
+######   TEAMNAME
+teamnameData<-dbReadTable(con, "RAW_team_names")%>%
+  # Filtering to the actual interesting analysis
+  filter(vid_UUID == VID_UUID & analysis_UUID == ANALYSIS_UUID) %>%
+  select(-vid_UUID, -analysis_UUID)
+detectedTeamnames<- teamnameData %>%
+  filter(!is.na(team_name)) %>%
+  group_by(team_UUID) %>%
+  count(team_name) %>%
+  top_n(1)%>%
+  select(team_UUID, team_name)%>%
+  ungroup()
+```
+
+```{r data-player_name, message=FALSE, warning=FALSE, include=FALSE}
+##################################################################################
+######   NICKNAME
+nicknameData <- dbReadTable(con, "RAW_players_nicknames")%>%
+  # Filtering to the actual interesting analysis
+  filter(vid_UUID == VID_UUID & analysis_UUID == ANALYSIS_UUID) %>%
+  select(-vid_UUID, -analysis_UUID)
+detectedNicknames <- nicknameData %>%
+  filter(!is.na(player_name) & player_name != "" & nchar(player_name) >= 3 & nchar(player_name)<=12) %>%
+  group_by(team_UUID, player_UUID) %>%
+  count(player_name) %>%
+  top_n(1)%>%
+  select(team_UUID, player_UUID, player_name)%>%
+  ungroup()
+```
+
+
+
+```{r data-adding-names}
+##################################################################################
+######   ADDING NAMES TO ANALYZED DATA
+##  > HEALTHDATA
+healthData %<>% 
+  rowwise() %>%
+  mutate(player_name=detectedNicknames[detectedNicknames$player_UUID==player_UUID & detectedNicknames$team_UUID==team_UUID,]$player_name,
+         team_name=detectedTeamnames[detectedTeamnames$team_UUID==team_UUID,]$team_name)
+
+##  > DEATH EVENTS
+deathEvents %<>% 
+  rowwise() %>%
+  mutate(player_name=detectedNicknames[detectedNicknames$player_UUID==player_UUID & detectedNicknames$team_UUID==team_UUID,]$player_name,
+         team_name=detectedTeamnames[detectedTeamnames$team_UUID==team_UUID,]$team_name)
+
+
+##  > ULTIMATE EVENTS
+ultimateEvents %<>% 
+  rowwise() %>%
+  mutate(player_name=detectedNicknames[detectedNicknames$player_UUID==player_UUID & detectedNicknames$team_UUID==team_UUID,]$player_name,
+         team_name=detectedTeamnames[detectedTeamnames$team_UUID==team_UUID,]$team_name)
+
+##  > ULTIMATE COMBINATIONS
+ultimateCombinations %<>% 
+  rowwise() %>%
+  mutate(player_name=detectedNicknames[detectedNicknames$player_UUID==player_UUID & detectedNicknames$team_UUID==team_UUID,]$player_name,
+         team_name=detectedTeamnames[detectedTeamnames$team_UUID==team_UUID,]$team_name,
+         frame=start)
+
+##  > TEAM FIGHT DEATHS 
+teamFightDeathData %<>% 
+  rowwise() %>%
+  mutate(player_name=detectedNicknames[detectedNicknames$player_UUID==player_UUID & detectedNicknames$team_UUID==team_UUID,]$player_name,
+         team_name=detectedTeamnames[detectedTeamnames$team_UUID==team_UUID,]$team_name,
+         frame=start)
+##  > TEAM FIGHT RESULTS
+teamFightResult %<>% 
+  rowwise() %>%
+  mutate(team_name=detectedTeamnames[detectedTeamnames$team_UUID==team_UUID,]$team_name)
+
+
+nicknameData %<>% 
+  rowwise() %>%
+  mutate(team_name=detectedTeamnames[detectedTeamnames$team_UUID==team_UUID,]$team_name)
+
+
+
+
+
+```
+
+
+
+###Game overview analysis
+
+#### Events overview
+```{r viz-overview}
+plotEventSequence(deathEvents, ultimateEvents, ultimateCombinations) %>% 
+  ggplotly() 
+```
+
+#### Team Fight Deaths
+
+```{r viz-team_UUID-fight-deaths}
+teamFightDeathData %>% plotTeamFightDeaths()
+teamFightDeathData %>% plotTeamFightRatio()
+```
+
+
+
+```{r viz-team_UUID-fight}
+
+for (teamFight in unique(teamFightResult$DeathFight_id)) {
+  print(paste("### Team Fight",teamFight, "Analysis \n"))
+  print(paste("Won by team_UUID", (teamFightResult %>% filter(DeathFight_id == teamFight & result == "WIN"))$team_name ,"\n"))
+
+  # health related data
+  teamFightHealthData <- healthData %>% 
+    getDataInterval(fightIntervals[teamFight,"start"], fightIntervals[teamFight,"stop"])
+  
+  # Death related data
+  teamFightDeathEvents <- deathEvents %>%
+    getDataInterval(fightIntervals[teamFight,"start"], fightIntervals[teamFight,"stop"])
+  
+  # Ultimate events related data
+  teamFightUltimateEvents <- ultimateEvents %>%
+    getDataInterval(fightIntervals[teamFight,"start"], fightIntervals[teamFight,"stop"])
+  
+  # Ultimate Combinations related data
+  teamFightUltimateCombinations<-ultimateCombinations%>%
+    getDataInterval(fightIntervals[teamFight,"start"], fightIntervals[teamFight,"stop"])
+    
+  print(paste("First death:", (teamFightDeathEvents %>%top_n(1, frame))[1,]$player_name ,"\n"))
+  
+
+  plotEventSequence(teamFightDeathEvents, teamFightUltimateEvents, teamFightUltimateCombinations) %>% print()
+  #  ggplotly()
+  #teamFightUltimateCombinations %>%
+  #  plotCombinationSequence() %>%
+  #  ggplotly() %>%
+  #  print()
+  
+  teamFightHealthData %>%
+    plotHealthBars() %>% print()
+  #  ggplotly()
+  
+  teamFightHealthData %>%
+    plotDeltaBars() %>%  print()
+  #  ggplotly()
+  
+  #teamFightHealthData %>%
+  #  plotDeathPeriods() %>%
+  #  ggplotly() %>%
+  #  print()
+  
+  teamFightHealthData %>%
+    plotDeathTimestamps() %>% print()
+  #  ggplotly()
+  
+  #teamFightUltimateEvents %>%
+  #  plotUltimatePeriods()%>%
+  #  ggplotly() %>%
+  #  print()
+  
+  teamFightUltimateEvents %>%
+    plotUltimateTimestamps()%>% print()
+  #  ggplotly()
+}
+
+
+```
+
+```{r interest-regression, echo=FALSE, message=FALSE, warning=FALSE}
+
+# let's split the audio in 0.1s frames with a 0.05s step
+# frame 1: 00:00:00.00 -> 00:00:00.10
+# frame 2: 00:00:00.05 -> 00:00:00.15
+# let's goal for 60 FPS, the frame per second is calculed as such: 1(sec) / ( windowSize / overlap )
+# We consider overlap = 0.5 to get a 50% overlap between audio frames.
+# 1 / (windowSize / 0.5) = 1 / (2 * windowSize) = FPS
+# let's consider 60 FPS.
+# 1 / (2*FPS) = windowSize
+# 1/120 = windowSize = 8.3ms
+# that's gonna be a tad problematic with our amount of variables extracted, hence a FPS of 30 will be used:
+# windowSize = 1 / 60 ~= 17ms
+# with an overlap window of ~ 8ms
+
+
+# on crée l'échelle de frames sur lesquels notre profil sera défini
+# On considère nos données sur les barres de santé comme les plus fournies, donc on s'en sert de maitre - étalon.
+MINFRAME = min(healthData$frame)
+MAXFRAME = max(healthData$frame)
+interest = data.frame( x = MINFRAME:MAXFRAME, interest=0)
+FPS = 30
+
+# Calculating Health activity interest.
+# For each member of each team
+# A. if there's a change in damage Taken: it's interesting, else it isn't.
+#    we will consider  5+ damage per sec as interesting (= 0.2), 10+ DPS as very interesting (= 0.5) and 20+ DPS as extatic (= 1)
+DMGTAKEN_THRESHOLD_LOW = 5
+DMGTAKEN_THRESHOLD_MED = 10
+DMGTAKEN_THRESHOLD_HIGH = 20
+
+pred.dmgTaken = data.frame(damageTaken=numeric(0),frame=numeric(0),player_UUID=numeric(0), team_UUID=numeric(0))
+
+for(player_uuid in unique(healthData$player_UUID)){
+  for(team_uuid in unique(healthData$team_UUID)){
+    pred.dmgTaken %<>%
+      # Ici on fait de l'interpolation sur nos données pour prédire les valeurs de dégats recus sur des frames que l'on n'as pas forcément, à partir de celles connues avec une regression par méthode loess.
+      rbind(list(damageTaken=predict(loess(damageTaken~frame, healthData%>%filter(team_UUID==team_uuid & player_UUID==player_uuid),span=1/FPS), interest$x),
+                 frame=interest$x,
+                 player_UUID=rep.int(player_uuid,length(interest$x)),
+                 team_UUID=rep.int(team_uuid, length(interest$x))))
+  }
+}
+
+pred.dmgTaken %<>% 
+  mutate(interest.label = if_else(damageTaken>=DMGTAKEN_THRESHOLD_HIGH, "(+ 1.0) HIGH", 
+                            if_else(damageTaken>=DMGTAKEN_THRESHOLD_MED, "(+ 0.5) MEDIUM", 
+                                    if_else(damageTaken>=DMGTAKEN_THRESHOLD_LOW, "(+ 0.2) LOW", 
+                                            "(+ 0.0) BORING"))),
+         interest = if_else(damageTaken>=DMGTAKEN_THRESHOLD_HIGH, 1, 
+                            if_else(damageTaken>=DMGTAKEN_THRESHOLD_MED, 0.5, 
+                                    if_else(damageTaken>=DMGTAKEN_THRESHOLD_LOW, .2, 
+                                            0))))
+pred.dmgTaken %>%
+  ggplot(aes(x=frame, y=damageTaken, color=interest.label))+
+    geom_line()+
+    geom_abline(aes(slope=0, intercept=DMGTAKEN_THRESHOLD_LOW, color="(+ 0.2) LOW"))+
+    geom_abline(aes(slope=0, intercept=DMGTAKEN_THRESHOLD_MED, color="(+ 0.5) MEDIUM"))+
+    geom_abline(aes(slope=0, intercept=DMGTAKEN_THRESHOLD_HIGH, color="(+ 1.0) HIGH"))+
+    facet_grid(player_UUID~team_UUID, scales="free")+
+  ggtitle("Individual interest due to individual Damage Per Second taken per frame.")
+
+
+pred.dmgTaken %<>%
+  group_by(frame) %>%
+  tally(interest, name="interest")
+
+pred.dmgTaken %>%
+  ggplot(aes(x=frame, y=interest, color= interest))+
+  geom_line()+
+  ggtitle("Total interest due to Damage Per Second taken per frame.")
+
+```
+```{r}
+# B. if there's a change in heal received: it's interesting, else it isn't.
+#    we will consider  5+ heal per sec as interesting (= 0.2), 10+ HPS as very interesting (= 0.5) and 20+ HPS as extatic (= 1)
+HEALRECEIVED_THRESHOLD_LOW = 5
+HEALRECEIVED_THRESHOLD_MED = 10
+HEALRECEIVED_THRESHOLD_HIGH = 20
+
+pred.healReceived = data.frame(healTaken=numeric(0),frame=numeric(0),player_UUID=numeric(0), team_UUID=numeric(0))
+
+for(player_uuid in unique(healthData$player_UUID)){
+  for(team_uuid in unique(healthData$team_UUID)){
+    pred.healReceived %<>%
+      rbind(list(healTaken=predict(loess(healTaken~frame, healthData%>%filter(team_UUID==team_uuid & player_UUID==player_uuid),span=1/FPS), interest$x),
+                 frame=interest$x,
+                 player_UUID=rep.int(player_uuid,length(interest$x)),
+                 team_UUID=rep.int(team_uuid, length(interest$x))))
+  }
+}
+
+pred.healReceived %<>% 
+  group_by(player_UUID, team_UUID) %>%
+  mutate(interest.label = if_else(healTaken>=HEALRECEIVED_THRESHOLD_HIGH, "(+ 1.0) HIGH", 
+                            if_else(healTaken>=HEALRECEIVED_THRESHOLD_MED, "(+ 0.5) MEDIUM", 
+                                    if_else(healTaken>=HEALRECEIVED_THRESHOLD_LOW, "(+ 0.2) LOW", 
+                                            "(+ 0.0) BORING"))),
+         interest = if_else(healTaken>=HEALRECEIVED_THRESHOLD_HIGH, 1, 
+                            if_else(healTaken>=HEALRECEIVED_THRESHOLD_MED, 0.5, 
+                                    if_else(healTaken>=HEALRECEIVED_THRESHOLD_LOW, .2, 
+                                            0))))%>%
+  ungroup()
+pred.healReceived %>%
+  ggplot(aes(x=frame, y=healTaken, color=interest.label))+
+    geom_line()+
+    geom_abline(aes(slope=0, intercept=HEALRECEIVED_THRESHOLD_LOW, color="(+ 0.2) LOW"))+
+    geom_abline(aes(slope=0, intercept=HEALRECEIVED_THRESHOLD_MED, color="(+ 0.5) MEDIUM"))+
+    geom_abline(aes(slope=0, intercept=HEALRECEIVED_THRESHOLD_HIGH, color="(+ 1.0) HIGH"))+
+    facet_grid(player_UUID~team_UUID, scales="free")+
+  ggtitle("Individual interest due to individual Heal Per Second received per frame.")
+
+pred.healReceived %<>%
+  group_by(frame) %>%
+  tally(interest, name="interest")
+
+pred.healReceived %>%
+  ggplot(aes(x=frame, y=interest, color= interest))+
+  geom_line()+
+  ggtitle("Total interest due to individual Heal Per Second received per frame.")
+```
+
+```{r}
+# C. if an ultimate is ready: it's interesting (+ 1), else it isn't (+ 0).
+# for this, for each player, we check it's list of related ultimate events.
+# from one event frame to the other, it's ultimate state is either 0 (not ready) or 1 (ready).
+pred.ultimateState = data.frame(ultimate_state=numeric(0),frame=numeric(0),player_UUID=numeric(0), team_UUID=numeric(0));
+for (team_uuid in unique(ultimateEvents$team_UUID)) {
+  for (player_uuid in unique(ultimateEvents$player_UUID)) {
+    pred.ultimateState %<>%
+      rbind(
+        list(  ultimate_state=rep.int(0,length(interest$x)),
+               frame=interest$x,
+               player_UUID=rep.int(player_uuid,length(interest$x)),
+               team_UUID=rep.int(team_uuid, length(interest$x))))
+    
+    playerEvents = ultimateEvents %>% filter(player_UUID == player_uuid & team_UUID == team_uuid)
+    lastKnownFrame = min(interest$x)
+    for(idx in rownames(playerEvents)){
+      event <- playerEvents[idx,]
+      pred.ultimateState[pred.ultimateState$frame >= lastKnownFrame &
+                          pred.ultimateState$frame < event$frame &
+                          pred.ultimateState$player_UUID==player_uuid &
+                          pred.ultimateState$team_UUID == team_uuid,] %<>%
+        mutate(  ultimate_state=if_else(event$ultimateChange == "READY", 0, 1)) # on change toutes les frames antérieures, donc à l'état qui viens de disparaitre.
+      lastKnownFrame = event$frame
+    }
+    
+  }
+}
+pred.ultimateState %>%
+  group_by(player_UUID, team_UUID)%>%
+  ggplot(aes(x=frame, y=ultimate_state))+
+  geom_line()+
+  facet_grid(player_UUID~team_UUID)+
+  ggtitle("Individual Ultimate readyness per frame.")
+
+pred.ultimateState %<>%
+  mutate(interest=ultimate_state)%>%
+  group_by(frame) %>%
+  tally(interest, name="interest")
+
+pred.ultimateState %>%
+  ggplot(aes(x=frame, y=interest, color= interest))+
+  geom_line()+
+  ggtitle("Total interest due to the amount of ready Ultimates per frame.")
+
+```
+```{r}
+# D. if an ultimate is used: it's interesting during 15 seconds for each use detected (multiple ultimates cumulate additively).
+pred.ultimateUsed = data.frame(used=numeric(0),frame=numeric(0),player_UUID=numeric(0), team_UUID=numeric(0));
+USED.DURATION = 15*FPS
+for (team_uuid in unique(ultimateEvents$team_UUID)) {
+  for (player_uuid in unique(ultimateEvents$player_UUID)) {
+    pred.ultimateUsed %<>%
+      rbind(
+        list(  used=rep.int(0,length(interest$x)),
+               frame=interest$x,
+               player_UUID=rep.int(player_uuid,length(interest$x)),
+               team_UUID=rep.int(team_uuid, length(interest$x))))
+    
+    playerEvents = ultimateEvents %>% filter(player_UUID == player_uuid & team_UUID == team_uuid & ultimateChange == "USED")
+    for(idx in rownames(playerEvents)){
+      event <- playerEvents[idx,]
+      pred.ultimateUsed[pred.ultimateUsed$frame >= event$frame &
+                          pred.ultimateUsed$frame < event$frame+USED.DURATION&  
+                          pred.ultimateUsed$player_UUID==player_uuid &
+                          pred.ultimateUsed$team_UUID == team_uuid,] %<>%
+        mutate( used = used + 1);
+    }
+    
+  }
+}
+
+pred.ultimateUsed %>%
+  group_by(player_UUID, team_UUID)%>%
+  ggplot(aes(x=frame, y=used))+
+  geom_line()+
+  facet_grid(player_UUID~team_UUID)+
+  ggtitle("Individual Ultimate usage interest per frame.")
+
+pred.ultimateUsed %<>%
+  group_by(frame)%>%
+  tally(used, name="interest")
+
+
+pred.ultimateUsed %>%
+  ggplot(aes(x=frame, y=interest, color= interest))+
+  geom_line()+
+  ggtitle("Total interest due to the amount of used Ultimates per frame.")
+```
+```{r}
+# E. if a player dies: it's interesting during 15 seconds for each death detected (multiple deaths cumulate additively).
+pred.playerDied = data.frame(died=numeric(0),frame=numeric(0),player_UUID=numeric(0), team_UUID=numeric(0));
+DIED.DURATION = 15*FPS
+for (team_uuid in unique(deathEvents$team_UUID)) {
+  for (player_uuid in unique(deathEvents$player_UUID)) {
+    pred.playerDied %<>%
+      rbind(
+        list(  died=rep.int(0,length(interest$x)),
+               frame=interest$x,
+               player_UUID=rep.int(player_uuid,length(interest$x)),
+               team_UUID=rep.int(team_uuid, length(interest$x))))
+    
+    playerEvents = deathEvents %>% filter(player_UUID == player_uuid & team_UUID == team_uuid & deathChange == "DEATH")
+    for(idx in rownames(playerEvents)){
+      event <- playerEvents[idx,]
+      pred.playerDied[pred.playerDied$frame >= event$frame &
+                          pred.playerDied$frame < event$frame+DIED.DURATION&  
+                          pred.playerDied$player_UUID==player_uuid &
+                          pred.playerDied$team_UUID == team_uuid,] %<>%
+        mutate( died = died + 1);
+    }
+    
+  }
+}
+
+pred.playerDied %>%
+  group_by(player_UUID, team_UUID)%>%
+  ggplot(aes(x=frame, y=died))+
+  geom_line()+
+  facet_grid(player_UUID~team_UUID)+
+  ggtitle("Individual Death interest per frame.")
+
+pred.playerDied %<>%
+  group_by(frame)%>%
+  tally(died, name="interest")
+
+
+pred.playerDied %>%
+  ggplot(aes(x=frame, y=interest, color= interest))+
+  geom_line()+
+  ggtitle("Total interest due to the amount of deaths per frame.")
+```
+```{r}
+# F. if a player spawns: it's interesting during 5 seconds for each spawn detected (multiple spawns cumulate additively).
+pred.playerSpawned = data.frame(respawned=numeric(0),frame=numeric(0),player_UUID=numeric(0), team_UUID=numeric(0));
+SPAWN.DURATION = 5*FPS
+for (team_uuid in unique(deathEvents$team_UUID)) {
+  for (player_uuid in unique(deathEvents$player_UUID)) {
+    pred.playerSpawned %<>%
+      rbind(
+        list(  respawned=rep.int(0,length(interest$x)),
+               frame=interest$x,
+               player_UUID=rep.int(player_uuid,length(interest$x)),
+               team_UUID=rep.int(team_uuid, length(interest$x))))
+    
+    playerEvents = deathEvents %>% filter(player_UUID == player_uuid & team_UUID == team_uuid & deathChange == "RESPAWN")
+    for(idx in rownames(playerEvents)){
+      event <- playerEvents[idx,]
+      pred.playerSpawned[pred.playerSpawned$frame >= event$frame &
+                          pred.playerSpawned$frame < event$frame+DIED.DURATION&  
+                          pred.playerSpawned$player_UUID==player_uuid &
+                          pred.playerSpawned$team_UUID == team_uuid,] %<>%
+        mutate( respawned = respawned + 1);
+    }
+    
+  }
+}
+
+pred.playerSpawned %>%
+  group_by(player_UUID, team_UUID)%>%
+  ggplot(aes(x=frame, y=respawned))+
+  geom_line()+
+  facet_grid(player_UUID~team_UUID)+
+  ggtitle("Individual spawn interest per frame.")
+
+pred.playerSpawned %<>%
+  group_by(frame)%>%
+  tally(respawned, name="interest")
+
+
+pred.playerSpawned %>%
+  ggplot(aes(x=frame, y=interest, color= interest))+
+  geom_line()+
+  ggtitle("Total interest due to the amount of respawns per frame.")
+```
+```{r}
+# Finally, we sum all those factors into one single interest distribution.
+interest %<>% mutate(interest = pred.dmgTaken$interest +
+                       pred.healReceived$interest +
+                       pred.ultimateState$interest+
+                       pred.ultimateUsed$interest+
+                       pred.playerDied$interest+
+                       pred.playerSpawned$interest)
+interest %>%
+  ggplot(aes(x=x, y=interest, color=interest))+
+  geom_line()+
+  ggtitle("Total global interest")
+
+
+```
+
+```{r results-upload}
+
+require(mongolite)
+if (is.na(USER)){
+  USER = rstudioapi::showPrompt(title = "Authentication required for result upload", 
+                                message = "Mongodb Username:",
+                                default = "")
+  
+  PASS = rstudioapi::askForPassword(prompt = "Password:")
+  
+}
+
+uploadData <- function(data, collection=NULL, analysis_UUID=ANALYSIS_UUID, vid_UUID=VID_UUID, db="Reports", user=USER, pass=PASS){
+    if (is.null(collection)){
+      stop("A collection must be specified.")
+    }
+    if (is.null(analysis_UUID)){
+      stop("An analysis UUID must be specified.")
+    }
+    if (is.null(vid_UUID)){
+      stop("A video UUID must be specified.")
+    }
+    if (is.null(db)){
+      stop("A database name must be specified.")
+    }
+    if (is.null(data)){
+      stop("Data must be specified.")
+    }
+    mongoCon <- mongo(db=db,
+                  collection = collection,
+                  url=paste0("mongodb+srv://",user,":",pass,"@metawatch-cluster0-zucpo.mongodb.net"),
+                  verbose=T);
+    
+    mongoCon$remove(paste0('{"analysis_UUID":',analysis_UUID, ',"vid_UUID":' ,vid_UUID, '}'));
+    data %>%
+      mutate(vid_UUID = vid_UUID, analysis_UUID = analysis_UUID) %>%
+      mongoCon$insert();
+    mongoCon$disconnect();
+  
+}
+
+
+
+uploadData(healthData, collection = "HealthData")
+uploadData(heroesAliveIntervals, collection="heroesAliveIntervals")
+
+
+uploadData(nicknameData, collection="nicknameData")
+uploadData(detectedNicknames, collection="detectedNicknames")
+uploadData(teamnameData, collection="teamnameData")
+uploadData(detectedTeamnames, collection = "detectedTeamnames")
+
+uploadData(deathEvents, collection = "deathEvents")
+
+uploadData(ultimateData, collection="ultimateData")
+uploadData(ultimateEvents, collection = "ultimateEvents")
+uploadData(ultimateCombinations, collection = "ultimateCombinations")
+
+uploadData(teamFightDeathData, collection = "teamFightDeathData")
+uploadData(fightIntervals, collection = "fightIntervals")
+uploadData(teamFightResult, collection = "teamFightResult")
+
+
+uploadData(interest, collection = "interest")
+```

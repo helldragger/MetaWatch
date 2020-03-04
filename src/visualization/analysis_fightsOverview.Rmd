@@ -1,0 +1,202 @@
+---
+title: "fights overview analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+# Fight analysis
+
+
+```{r init, echo=FALSE, message=FALSE, warning=FALSE}
+
+# example:
+# \         Pull  Connected Countered Hooked  DPS Follow  Ult Follow
+# count     12    6         2         2       1           3
+# kill      4     --        --        2       1           1
+# winfight  2     --        --        1       1           1
+# losefight --    --        --        --      --          --
+# %win      --    --        --        --      --          --
+
+# example:
+#             Tank    DPS   Heal    
+# Connected   8       6     --
+# %Connected  --      --    --
+# Kill        1       1     --
+# %Kill       --      --    --
+# winfight    2       1     --
+# losefight   --      --    --
+# %winfight   --      --    --
+
+# 
+
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+examplePullData <- tibble(c(connected=logical(0),countered=logical(0),hooked=logical(0),DPSfollow=logical(0),ULTfollow=logical(0), targetType=character(0))) %>%
+  rbind(
+    list(connected=T,countered=F,hooked=T,DPSfollow=T,ULTfollow=F, targetType="TANK"),
+    list(connected=T,countered=F,hooked=T,DPSfollow=F,ULTfollow=T, targetType="TANK"),
+    list(connected=T,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="TANK"),
+    list(connected=T,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="DPS"),
+    list(connected=T,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="DPS"),
+    list(connected=T,countered=T,hooked=F,DPSfollow=F,ULTfollow=F, targetType="TANK"),
+    list(connected=F,countered=T,hooked=F,DPSfollow=F,ULTfollow=F, targetType="DPS"),
+    list(connected=F,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="DPS"),
+    list(connected=F,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="TANK"),
+    list(connected=F,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="TANK"),
+    list(connected=F,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="TANK"),
+    list(connected=F,countered=F,hooked=F,DPSfollow=F,ULTfollow=F, targetType="DPS")
+  )
+
+
+
+examplePullData2 <- tibble(c(action=character(0),result=character(0), fight_id=numeric(0))) %>%
+  rbind(#
+    # Fight 1
+    list(action="PULL",result="CONNECTED", fight_id=0),
+    list(action="CONNECTED",result="HOOKED", fight_id=0),
+    list(action="HOOKED",result="DPS FOLLOW", fight_id=0),
+    list(action="DPS FOLLOW",result="KILL", fight_id=0),
+    list(action="DPS FOLLOW",result="WIN FIGHT", fight_id=0),
+    # Fight 2
+    list(action="PULL",result="CONNECTED", fight_id=1),
+    list(action="CONNECTED",result="HOOKED", fight_id=1),
+    list(action="HOOKED",result="DPS FOLLOW", fight_id=1),
+    list(action="DPS FOLLOW",result="KILL", fight_id=1),
+    list(action="DPS FOLLOW",result="WIN FIGHT", fight_id=1),
+    # Fight 3
+    list(action="PULL",result="CONNECTED", fight_id=2),
+    list(action="CONNECTED",result="HOOKED", fight_id=2),
+    list(action="HOOKED",result="ULT FOLLOW", fight_id=2),
+    list(action="ULT FOLLOW",result="KILL", fight_id=2),
+    list(action="ULT FOLLOW",result="LOSE FIGHT", fight_id=2),
+    # Fight 4
+    list(action="PULL",result="CONNECTED", fight_id=3),
+    list(action="CONNECTED",result="HOOKED", fight_id=3),
+    list(action="HOOKED",result="ULT FOLLOW", fight_id=3),
+    list(action="ULT FOLLOW",result="KILL", fight_id=3),
+    list(action="ULT FOLLOW",result="WIN FIGHT", fight_id=3),
+    # Fight 5
+    list(action="PULL",result="CONNECTED", fight_id=4),
+    list(action="CONNECTED",result="HOOKED", fight_id=4),
+    list(action="HOOKED",result="NO FOLLOW", fight_id=4),
+    list(action="NO FOLLOW",result="KILL", fight_id=4),
+    list(action="NO FOLLOW",result="WIN FIGHT", fight_id=4),
+    # Fight 6
+    list(action="PULL",result="CONNECTED", fight_id=5),
+    list(action="CONNECTED",result="HOOKED", fight_id=5),
+    list(action="HOOKED",result="NO FOLLOW", fight_id=5),
+    list(action="NO FOLLOW",result="KILL", fight_id=5),
+    list(action="NO FOLLOW",result="LOSE FIGHT", fight_id=5),
+    # Fight 7
+    list(action="PULL",result="CONNECTED", fight_id=6),
+    list(action="CONNECTED",result="HOOKED", fight_id=6),
+    list(action="HOOKED",result="NO FOLLOW", fight_id=6),
+    list(action="NO FOLLOW",result="LOSE FIGHT", fight_id=6),
+    # Fight 8
+    list(action="PULL",result="CONNECTED", fight_id=7),
+    list(action="CONNECTED",result="NO FOLLOW", fight_id=7),
+    list(action="NO FOLLOW",result="LOSE FIGHT", fight_id=7)
+  )
+```
+
+### Fight efficiency analysis
+```{r fight analysis, echo=FALSE, message=FALSE, warning=FALSE}
+library(plotly)
+plotFightSankeyDiagram <- function(data, fightName="overview"){
+  actionsList <- as.factor(unique(c(as.character(data$action), as.character(data$result))))
+
+  links <- data %>% 
+    group_by(action)%>%
+    count(result)%>%
+    ungroup()%>%
+    mutate(result = lapply(result,  
+                           function(element){ 
+                              return(actionsList[which(actionsList == as.character(element))])}),
+           action = lapply(action,  
+                           function(element){ 
+                              return(actionsList[which(actionsList == as.character(element))])}))%>%
+    unnest()
+  return(plot_ly(
+      type = "sankey",
+      orientation = "h",
+  
+      node = list(
+        label = levels(actionsList),
+        pad = 15,
+        thickness = 20,
+        line = list(
+          color = "black",
+          width = 0.5
+        )
+      ),
+      link = list(
+        source = as.numeric(links$action) - 1,
+        target = as.numeric(links$result) - 1,
+        value =  links$n
+      )
+    ) %>% 
+    layout(
+      title = paste("Fight", fightName ,"events"),
+      font = list(
+        size = 10
+      )
+  ))
+}
+# overview fight schematic
+plotFightSankeyDiagram(examplePullData2)
+# individual fight schematic
+for (fight in unique(examplePullData2$fight_id)) {
+  print(plotFightSankeyDiagram(examplePullData2%>%filter(fight_id==fight), fight))
+  
+}
+
+```
+
+## Fight won statistics
+```{r}
+
+actionData <- examplePullData2 %>%
+                group_by(fight_id)
+
+FIGHTS_WON <- examplePullData2 %>% 
+                 filter(as.character(result) == "WIN FIGHT") %>% 
+                 select(fight_id)
+
+#examplePullData2 %>%
+#  group_by(fight_id)%>%
+#  mutate(won=fight_id %in% FIGHTS_WON$fight_id)%>%
+#  ungroup() %>%
+#  group_by(action)%>%
+  
+
+
+FIGHTS_WON <- examplePullData2 %>% 
+                 filter(as.character(result) == "WIN FIGHT") %>% 
+                 select(fight_id)
+
+
+winData <- examplePullData2%>%
+  filter(fight_id %in% FIGHTS_WON$fight_id)
+
+winData %>% 
+  group_by(action)%>%
+  count(result)%>%
+  arrange(-n)
+
+FIGHTS_LOST <- examplePullData2 %>% 
+                 filter(as.character(result) == "LOSE FIGHT") %>% 
+                 select(fight_id)
+
+lostData <- examplePullData2%>%
+  filter(fight_id %in% FIGHTS_LOST$fight_id)
+
+
+lostData %>% 
+  group_by(action)%>%
+  count(result)%>%
+  arrange(-n)
+```
