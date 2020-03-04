@@ -1,5 +1,6 @@
 MetaWatch
 ==============================
+[WIP] This project is currently under heavy prototyping stage and not that clean yet.
 
 Meta analysis of meta compositions in Overwatch
 
